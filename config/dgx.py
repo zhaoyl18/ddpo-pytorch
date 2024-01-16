@@ -49,8 +49,13 @@ def aesthetic():
     config.num_epochs = 200
     config.reward_fn = "aesthetic_score"
 
-    # this reward is a bit harder to optimize, so I used 2 gradient updates per epoch.
-    config.train.gradient_accumulation_steps = 4
+    # The following configs are for 4 gpus, each with memory 40 Gb. 
+    # I think for A100 GPU with 80 Gb, it's ok to set: config.train.batch_size=4, config.train.gradient_accumulation_steps=8 to save more time
+    config.sample.batch_size = 8
+    config.sample.num_batches_per_epoch = 8 #  If with 2 gpus, set this to 16
+
+    config.train.batch_size = 2
+    config.train.gradient_accumulation_steps = 16 # If with 2 gpus, set this to 32
 
     config.prompt_fn = "simple_animals"
     config.per_prompt_stat_tracking = {

@@ -2,6 +2,7 @@ from collections import defaultdict
 import contextlib
 import os
 import datetime
+import copy
 from concurrent import futures
 import time
 from absl import app, flags
@@ -17,7 +18,7 @@ import ddpo_pytorch.prompts
 import ddpo_pytorch.rewards
 from ddpo_pytorch.stat_tracking import PerPromptStatTracker
 from ddpo_pytorch.diffusers_patch.pipeline_with_logprob import pipeline_with_logprob
-from ddpo_pytorch.diffusers_patch.ddim_with_logprob import ddim_step_with_logprob
+from ddpo_pytorch.diffusers_patch.ddim_with_logprob import ddim_step_with_logprob, ddim_step_KL
 import torch
 import wandb
 from functools import partial
@@ -96,6 +97,11 @@ def main(_):
     pipeline.vae.requires_grad_(False)
     pipeline.text_encoder.requires_grad_(False)
     pipeline.unet.requires_grad_(not config.use_lora)
+    
+    unet_pretrained = copy.deepcopy(pipeline.unet)
+    for param in unet_pretrained.parameters():
+        param.requires_grad = False
+    
     # disable safety checker
     pipeline.safety_checker = None
     # make the progress bar nicer
@@ -112,14 +118,16 @@ def main(_):
     # For mixed precision training we cast all non-trainable weigths (vae, non-lora text_encoder and non-lora unet) to half-precision
     # as these weights are only used for inference, keeping weights in full precision is not required.
     inference_dtype = torch.float32
-    if accelerator.mixed_precision == "fp16":
-        inference_dtype = torch.float16
-    elif accelerator.mixed_precision == "bf16":
-        inference_dtype = torch.bfloat16
+    # if accelerator.mixed_precision == "fp16":
+    #     inference_dtype = torch.float16
+    # elif accelerator.mixed_precision == "bf16":
+    #     inference_dtype = torch.bfloat16
 
     # Move unet, vae and text_encoder to device and cast to inference_dtype
     pipeline.vae.to(accelerator.device, dtype=inference_dtype)
     pipeline.text_encoder.to(accelerator.device, dtype=inference_dtype)
+    unet_pretrained.to(accelerator.device, dtype=inference_dtype)
+    
     if config.use_lora:
         pipeline.unet.to(accelerator.device, dtype=inference_dtype)
 
@@ -484,6 +492,7 @@ def main(_):
             # train
             pipeline.unet.train()
             info = defaultdict(list)
+
             for i, sample in tqdm(
                 list(enumerate(samples_batched)),
                 desc=f"Epoch {epoch}.{inner_epoch}: training",
@@ -498,6 +507,8 @@ def main(_):
                 else:
                     embeds = sample["prompt_embeds"]
 
+                kl_loss = 0
+                
                 for j in tqdm(
                     range(num_train_timesteps),
                     desc="Timestep",
@@ -519,11 +530,29 @@ def main(_):
                                     + config.sample.guidance_scale
                                     * (noise_pred_text - noise_pred_uncond)
                                 )
+                                # Predicted noise from the pretrained model
+                                old_noise_pred = unet_pretrained(
+                                    torch.cat([sample["latents"][:, j]] * 2),
+                                    torch.cat([sample["timesteps"][:, j]] * 2),
+                                    embeds,
+                                ).sample
+                                old_noise_pred_uncond, old_noise_pred_text = old_noise_pred.chunk(2)
+                                old_noise_pred = (
+                                    old_noise_pred_uncond
+                                    + config.sample.guidance_scale 
+                                    * ( old_noise_pred_text - old_noise_pred_uncond)
+                                )
                             else:
                                 noise_pred = unet(
                                     sample["latents"][:, j],
                                     sample["timesteps"][:, j],
                                     embeds,
+                                ).sample
+                                # Predicted noise from the pretrained model
+                                old_noise_pred = unet_pretrained(
+                                    sample["latents"][:, j],   # (2,4,64,64)
+                                    sample["timesteps"][:, j], # (2,50)
+                                    embeds,  # (4,77,768)
                                 ).sample
                             # compute the log prob of next_latents given latents under the current model
                             _, log_prob = ddim_step_with_logprob(
@@ -534,7 +563,17 @@ def main(_):
                                 eta=config.sample.eta,
                                 prev_sample=sample["next_latents"][:, j],
                             )
-
+                            # compute KL divergence
+                            kl_terms = ddim_step_KL(
+                                pipeline.scheduler,
+                                noise_pred,   # (2,4,64,64),
+                                old_noise_pred, # (2,4,64,64),
+                                sample["timesteps"][:, j],
+                                sample["latents"][:, j],
+                                eta=config.sample.eta,  # 1.0
+                            )
+                            kl_loss += torch.mean(kl_terms).to(inference_dtype)
+                            
                         # ppo logic
                         advantages = torch.clamp(
                             sample["advantages"],
@@ -576,19 +615,23 @@ def main(_):
                         optimizer.step()
                         optimizer.zero_grad()
 
+                        if j == num_train_timesteps - 1:
+                            info["KL-entropy"].append(kl_loss)
+                    
                     # Checks if the accelerator has performed an optimization step behind the scenes
                     if accelerator.sync_gradients:
                         assert (j == num_train_timesteps - 1) and (
                             i + 1
                         ) % config.train.gradient_accumulation_steps == 0
                         # log training-related stuff
+
                         info = {k: torch.mean(torch.stack(v)) for k, v in info.items()}
                         info = accelerator.reduce(info, reduction="mean")
                         info.update({"epoch": epoch, "inner_epoch": inner_epoch})
                         accelerator.log(info, step=global_step)
                         global_step += 1
                         info = defaultdict(list)
-
+                
             # make sure we did an optimization step at the end of the inner epoch
             assert accelerator.sync_gradients
 
