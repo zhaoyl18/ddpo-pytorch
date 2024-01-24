@@ -581,8 +581,8 @@ def main(_):
                             config.train.adv_clip_max,
                         )
                         ratio = torch.exp(log_prob - sample["log_probs"][:, j])
-                        unclipped_loss = -advantages * ratio
-                        clipped_loss = -advantages * torch.clamp(
+                        unclipped_loss = (-advantages + config.train.kl_weight * kl_terms) * ratio
+                        clipped_loss = (-advantages + config.train.kl_weight * kl_terms) * torch.clamp(
                             ratio,
                             1.0 - config.train.clip_range,
                             1.0 + config.train.clip_range,

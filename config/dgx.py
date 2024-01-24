@@ -56,6 +56,8 @@ def aesthetic():
 
     config.train.batch_size = 2
     config.train.gradient_accumulation_steps = 16 # If with 2 gpus, set this to 32
+    
+    config.train.kl_weight = 0.001 # probably also test 0.01? (though 0.001 might already be bad)
 
     config.prompt_fn = "simple_animals"
     config.per_prompt_stat_tracking = {
