@@ -43,3 +43,9 @@ bat
 gorilla
 hedgehog
 kangaroo
+snail
+hippopotamus
+cheetah
+crocodile
+lobster
+octopus
