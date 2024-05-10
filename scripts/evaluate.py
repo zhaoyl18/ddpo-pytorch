@@ -35,9 +35,15 @@ def evaluate(model_path):
     parser = argparse.ArgumentParser()
 
     # Add arguments
+    # parser.add_argument('--resume_from', type=str, default='logs/2024.01.28_01.43.07/checkpoints/checkpoint_50')
     parser.add_argument('--resume_from', type=str, default='logs/2024.01.28_01.43.07/checkpoints/checkpoint_60')
+
+    # parser.add_argument('--run_name', type=str, default='DPOK_ckpt_50')
+    parser.add_argument('--run_name', type=str, default='DPOK_ckpt_60')
+    
     parser.add_argument('--sample_batch_size', type=int, default=16)
-    parser.add_argument('--eval_batch_size', type=int, default=4)
+    parser.add_argument('--num_samples', type=int, default=512)
+
     parser.add_argument('--seed', type=int, default=42)
     parser.add_argument('--kl_weight', type=float, default=0.001)
     
@@ -48,12 +54,25 @@ def evaluate(model_path):
     parser.add_argument('--guidance_scale', type=float, default=5.0)
     parser.add_argument('--pretrained_model', type=str, default="CompVis/stable-diffusion-v1-4")
     parser.add_argument('--pretrained_revision', type=str, default="main")
-    parser.add_argument('--out_dir', type=str, default="logs/eval")
+    parser.add_argument('--out_dir', type=str, default="")
     
-    parser.add_argument('--prompt_fn', type=str, default="eval_simple_animals")
+    parser.add_argument('--prompt_fn', type=str, default="eval_aesthetic_animals")
     parser.add_argument('--reward_fn', type=str, default="aesthetic_score")
 
     config = parser.parse_args()
+    
+    unique_id = datetime.datetime.now().strftime("%Y.%m.%d_%H.%M.%S")
+    
+    if not config.run_name:
+        config.run_name = unique_id
+    else:
+        config.run_name += "_" + unique_id
+    
+    if not config.out_dir:          
+        config.out_dir = f"logs/{config.run_name}/eval_vis"
+    
+    if not os.path.exists(config.out_dir):
+        os.makedirs(config.out_dir)
     
     if model_path is not None:
         config.resume_from = model_path
@@ -69,7 +88,7 @@ def evaluate(model_path):
             sorted(checkpoints, key=lambda x: int(x.split("_")[-1]))[-1],
         )
         
-    wandb.init(project="ddpo-evaluation", name=config.resume_from, config=config)
+    wandb.init(project="ddpo-evaluation", name=config.run_name, entity='fderc_diffusion', config=config)
 
     accelerator = Accelerator()
     set_seed(config.seed, device_specific=True)
@@ -179,7 +198,7 @@ def evaluate(model_path):
         ).input_ids.to(accelerator.device)
     )[0]
     sample_neg_prompt_embeds = neg_prompt_embed.repeat(config.sample_batch_size, 1, 1)
-    train_neg_prompt_embeds = neg_prompt_embed.repeat(config.eval_batch_size, 1, 1)
+    # train_neg_prompt_embeds = neg_prompt_embed.repeat(config.eval_batch_size, 1, 1)
 
 
     # for some reason, autocast is necessary for non-lora training but for lora training it isn't necessary and it uses
@@ -200,12 +219,23 @@ def evaluate(model_path):
     #################### SAMPLING ####################
     pipeline.unet.eval()
     samples = []
-    prompts = []
-    for i in range(1):
+    prompts_list = []
+    images_list = []
+    rewards_list = []
+    
+    num_iters = config.num_samples // config.sample_batch_size
+    for i in tqdm(range(num_iters), desc="Sampling Iterations", position=0, leave=True):
+        wandb.log(
+            {"inner_iter": i}
+        )
+        
         # generate prompts
         prompts, prompt_metadata = zip(
             *[prompt_fn() for _ in range(config.sample_batch_size)]
         )
+        
+        prompts_list.extend(prompts)
+        # accelerator.print(prompts)
 
         # encode prompts
         prompt_ids = pipeline.tokenizer(
@@ -233,9 +263,12 @@ def evaluate(model_path):
         log_probs = torch.stack(log_probs, dim=1)  # (batch_size, num_steps, 1)
         timesteps = pipeline.scheduler.timesteps.repeat(config.sample_batch_size, 1)  # (batch_size, num_steps)
 
+        images_list.extend(images)
+        
         # compute rewards asynchronously
         rewards = executor.submit(reward_fn, images, prompts, prompt_metadata)
-            
+        
+        
         # yield to to make sure reward computation starts
         time.sleep(0)
 
@@ -250,32 +283,32 @@ def evaluate(model_path):
                 "rewards": rewards,
             }
         )
-
+        
     # wait for all rewards to be computed
     for sample in samples:
         rewards, reward_metadata = sample["rewards"].result()
-        # accelerator.print(reward_metadata)
+        # accelerator.print(rewards)
         sample["rewards"] = torch.as_tensor(rewards, device=accelerator.device)
+        rewards_list.extend(rewards.tolist())
 
     # collate samples into dict where each entry has shape (num_batches_per_epoch * sample.batch_size, ...)
     samples = {k: torch.cat([s[k] for s in samples]) for k in samples[0].keys()}
 
     # # this is a hack to force wandb to log the images as JPEGs instead of PNGs
-    images_list = []
+    wandb_images_list = []
     
-    for idx, image in enumerate(images):
+    for idx, image in enumerate(images_list):
         pil = Image.fromarray((image.cpu().numpy().transpose(1, 2, 0) * 255).astype(np.uint8))
+        prompt = prompts_list[idx]
+        reward = rewards_list[idx]
+        
+        pil.save(config.out_dir +'/'+ f'{idx:03d}_{prompt}_{reward:.3f}.png')
+        
         pil = pil.resize((256, 256))
-        prompt = prompts[idx]
-        reward = rewards[idx]
-        
-        pil.save(config.out_dir +'/'+ f'{prompt}_{reward}.png')
-        
-        
-        images_list.append(wandb.Image(pil, caption=f"{prompt:.25} | {reward:.2f}"))
+        wandb_images_list.append(wandb.Image(pil, caption=f"{prompt:.25} | {reward:.2f}"))
     
     wandb.log(
-        {"images": images_list}
+        {"images": wandb_images_list}
     )
     
     wandb.log({"eval_reward_mean": torch.mean(rewards) ,

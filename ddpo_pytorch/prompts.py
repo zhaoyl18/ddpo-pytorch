@@ -46,6 +46,8 @@ def simple_animals():
 def eval_simple_animals():
     return from_file("eval_simple_animals.txt")
 
+def eval_aesthetic_animals():
+    return from_file("eval_aesthetic_animals.txt")
 
 def nouns_activities(nouns_file, activities_file):
     nouns = _load_lines(nouns_file)
