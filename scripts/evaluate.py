@@ -35,14 +35,14 @@ def evaluate(model_path):
     parser = argparse.ArgumentParser()
 
     # Add arguments
-    # parser.add_argument('--resume_from', type=str, default='logs/2024.01.28_01.43.07/checkpoints/checkpoint_50')
-    parser.add_argument('--resume_from', type=str, default='logs/2024.01.28_01.43.07/checkpoints/checkpoint_60')
+    # parser.add_argument('--resume_from', type=str, default='logs_DPOK/2024.01.28_01.43.07/checkpoints/checkpoint_50')
+    parser.add_argument('--resume_from', type=str, default='logs_DPOK/2024.01.28_01.43.07/checkpoints/checkpoint_60')
 
     # parser.add_argument('--run_name', type=str, default='DPOK_ckpt_50')
     parser.add_argument('--run_name', type=str, default='DPOK_ckpt_60')
     
     parser.add_argument('--sample_batch_size', type=int, default=16)
-    parser.add_argument('--num_samples', type=int, default=512)
+    parser.add_argument('--num_samples', type=int, default=128)
 
     parser.add_argument('--seed', type=int, default=42)
     parser.add_argument('--kl_weight', type=float, default=0.001)
